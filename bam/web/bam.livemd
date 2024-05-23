@@ -19,55 +19,6 @@ Evision.getBuildInformation() |> IO.puts()
 ```
 
 ```elixir
-defmodule SilenceFiller do
-  use Membrane.Filter
-
-  def_input_pad(:input, accepted_format: Membrane.RawAudio)
-  def_output_pad(:output, accepted_format: Membrane.RawAudio)
-
-  @time Membrane.Time.milliseconds(20)
-
-  @impl true
-  def handle_stream_format(:input, _format, ctx, state) when ctx.old_stream_format != nil do
-    {[], state}
-  end
-
-  @impl true
-  def handle_stream_format(:input, format, _ctx, _opts) do
-    {[stream_format: {:output, format}, start_timer: {:timer, @time}], %{overtime: 0, pts: 0}}
-  end
-
-  @impl true
-  def handle_tick(:timer, ctx, state) do
-    %{overtime: overtime, pts: pts} = state
-    time = @time - overtime
-
-    if time > 0 do
-      silence = Membrane.RawAudio.silence(ctx.pads.input.stream_format, time)
-      buffer = %Membrane.Buffer{payload: silence, pts: state.pts}
-
-      real_time =
-        Membrane.RawAudio.bytes_to_time(byte_size(buffer.payload), ctx.pads.input.stream_format)
-
-      {[buffer: {:output, buffer}], %{state | pts: pts + real_time, overtime: 0}}
-    else
-      {[], %{state | overtime: overtime - @time}}
-    end
-  end
-
-  @impl true
-  def handle_buffer(:input, buffer, ctx, state) do
-    duration =
-      Membrane.RawAudio.bytes_to_time(byte_size(buffer.payload), ctx.pads.input.stream_format)
-
-    actions = [buffer: {:output, %{buffer | pts: state.pts}}]
-    state = %{state | overtime: state.overtime + duration, pts: state.pts + duration}
-    {actions, state}
-  end
-end
-```
-
-```elixir
 import Membrane.ChildrenSpec
 
 {:ok, _sup, p} = Kino.start_child(Membrane.RCPipeline)
@@ -85,9 +36,7 @@ Membrane.RCPipeline.exec_actions(p,
     |> child(Membrane.H264.FFmpeg.Decoder)
     |> child(%Membrane.FFmpeg.SWScale.PixelFormatConverter{format: :RGB})
     |> child(%BamBam{frame: frame})
-    |> child(SilenceFiller)
     |> child(Membrane.Opus.Encoder)
-    |> via_in(:input, options: [kind: :audio])
     |> child(%Membrane.WebRTC.Sink{signaling: {:websocket, ip: {192, 168, 83, 200}, port: 8830}})
   # |> child(Membrane.PortAudio.Sink)
 
@@ -112,13 +61,10 @@ defmodule BamBam do
 
   @impl true
   def handle_setup(_ctx, opts) do
-    <<_pre_bam::binary-size(2000 * 4), bam::binary-size(15_000 * 4), _rest::binary>> =
+    <<_pre_bam::binary-size(2000 * 4), bam::binary-size(10_000 * 4), _rest::binary>> =
       File.read!("#{__DIR__}/bam.pcm")
 
-    <<_pre_clap::binary-size(2000 * 4), clap::binary>> = File.read!("#{__DIR__}/clap.pcm")
-
     bam = %Membrane.Buffer{payload: bam}
-    clap = %Membrane.Buffer{payload: clap}
 
     path = "#{__DIR__}/../models"
 
@@ -130,7 +76,7 @@ defmodule BamBam do
     Evision.DNN.Net.setPreferableTarget(net, Evision.Constant.cv_DNN_TARGET_OPENCL())
     Evision.DNN.Net.setPreferableBackend(net, Evision.Constant.cv_DNN_BACKEND_OPENCV())
 
-    {[], %{task: nil, frame: opts.frame, net: net, up_time: nil, bam: bam, clap: clap}}
+    {[], %{task: nil, frame: opts.frame, net: net, up_time: nil, bam: bam}}
   end
 
   @impl true
@@ -158,23 +104,16 @@ defmodule BamBam do
   end
 
   @impl true
-  def handle_info({:inference, x, y}, _ctx, state) do
+  def handle_info({:inference, _x, y}, _ctx, state) do
     cond do
-      y < state.up_time ->
-        {[], %{state | up_time: y}}
+      y < 0.5 ->
+        {[], %{state | up_time: Membrane.Time.monotonic_time()}}
 
-      y - state.up_time > 0.1 ->
+      y > 0.6 and state.up_time != nil ->
         # and Membrane.Time.monotonic_time() - state.up_time < Membrane.Time.second() ->
-        buffer =
-          if x < 0.5 do
-            IO.write("CLAP ")
-            state.clap
-          else
-            IO.write("BAM ")
-            state.bam
-          end
+        IO.write("BAM ")
 
-        {[buffer: {:output, buffer}], %{state | up_time: nil}}
+        {[buffer: {:output, state.bam}], %{state | up_time: nil}}
 
       true ->
         {[], state}
@@ -204,8 +143,8 @@ defmodule BamBam do
       |> List.flatten()
       |> Enum.map(&Evision.Mat.to_nx/1)
       |> Enum.flat_map(&Nx.to_list/1)
-      |> Enum.map(fn [x, y, _w, h | scores] ->
-        %{x: x - h / 2, y: y, score: Enum.max(scores)}
+      |> Enum.map(fn [x, y, _w, _h | scores] ->
+        %{x: x, y: y, score: Enum.max(scores)}
       end)
       |> Enum.sort_by(& &1.score, :desc)
       |> hd()
@@ -214,6 +153,16 @@ defmodule BamBam do
       {output.x, output.y}
       |> tap(&Kino.Frame.render(state.frame, &1))
     end
+
+    # if output.score > 0.5 do
+    #   Evision.circle(img, {trunc(output.x * width), trunc(output.y * height)}, 100, {255},
+    #     thickness: -1
+    #   )
+    # else
+    #   Evision.circle(img, {0, 0}, 100, {255}, thickness: -1)
+    # end
+    # |> Evision.cvtColor(Evision.Constant.cv_COLOR_RGB2BGR())
+    # |> then(&Kino.Frame.render(state.frame, &1))
   end
 end
 ```
