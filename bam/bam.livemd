@@ -12,7 +12,7 @@ Mix.install([
 ])
 ```
 
-## Section
+## Setup
 
 ```elixir
 Evision.getBuildInformation() |> IO.puts()
@@ -67,38 +67,42 @@ defmodule SilenceFiller do
 end
 ```
 
+<!-- livebook:{"branch_parent_index":0} -->
+
+## Get media
+
 ```elixir
 import Membrane.ChildrenSpec
 
-{:ok, _sup, p} = Kino.start_child(Membrane.RCPipeline)
-
-frame = Kino.Frame.new()
+p = Membrane.RCPipeline.start_link!()
 
 Membrane.RCPipeline.exec_actions(p,
   spec:
-    child(%Membrane.WebRTC.Source{
-      signaling: {:websocket, ip: {192, 168, 83, 200}, port: 8829},
-      video_codec: :h264
-    })
-    |> via_out(:output, options: [kind: :video])
-    |> child(Membrane.H264.Parser)
-    |> child(Membrane.H264.FFmpeg.Decoder)
-    |> child(%Membrane.FFmpeg.SWScale.PixelFormatConverter{format: :RGB})
-    |> child(%BamBam{frame: frame})
-    |> child(SilenceFiller)
-    |> child(Membrane.Opus.Encoder)
-    |> via_in(:input, options: [kind: :audio])
-    |> child(%Membrane.WebRTC.Sink{signaling: {:websocket, ip: {192, 168, 83, 200}, port: 8830}})
-  # |> child(Membrane.PortAudio.Sink)
-
-  # |> child(Membrane.SDL.Player)
+    child(Membrane.CameraCapture)
+    |> child(%Membrane.FFmpeg.SWScale.PixelFormatConverter{format: :I420})
+    |> child(Membrane.SDL.Player)
 )
-
-frame
 ```
 
 ```elixir
-Membrane.RCPipeline.terminate(p, force?: true)
+Membrane.Pipeline.terminate(p)
+```
+
+## Detect hand movement
+
+```elixir
+path = "#{__DIR__}/../models"
+
+network =
+  Evision.DNN.readNetFromDarknet("#{path}/cross-hands.cfg",
+    darknetModel: "#{path}/cross-hands.weights"
+  )
+
+Evision.DNN.Net.setPreferableTarget(network, Evision.Constant.cv_DNN_TARGET_OPENCL())
+Evision.DNN.Net.setPreferableBackend(network, Evision.Constant.cv_DNN_BACKEND_OPENCV())
+output_layers = Evision.DNN.Net.getUnconnectedOutLayersNames(network)
+
+model = %{network: network, output_layers: output_layers, input_size: {416, 416}}
 ```
 
 ```elixir
@@ -108,29 +112,16 @@ defmodule BamBam do
   def_input_pad(:input, accepted_format: Membrane.RawVideo)
   def_output_pad(:output, accepted_format: Membrane.RawAudio)
 
-  def_options(frame: [])
+  @bam %Membrane.Buffer{payload: File.read!("#{__DIR__}/bam.pcm")}
+  @clap %Membrane.Buffer{payload: File.read!("#{__DIR__}/clap.pcm")}
+
+  def_options(model: [])
 
   @impl true
-  def handle_setup(_ctx, opts) do
-    <<_pre_bam::binary-size(2000 * 4), bam::binary-size(15_000 * 4), _rest::binary>> =
-      File.read!("#{__DIR__}/bam.pcm")
-
-    <<_pre_clap::binary-size(2000 * 4), clap::binary>> = File.read!("#{__DIR__}/clap.pcm")
-
-    bam = %Membrane.Buffer{payload: bam}
-    clap = %Membrane.Buffer{payload: clap}
-
-    path = "#{__DIR__}/../models"
-
-    net =
-      Evision.DNN.readNetFromDarknet("#{path}/cross-hands.cfg",
-        darknetModel: "#{path}/cross-hands.weights"
-      )
-
-    Evision.DNN.Net.setPreferableTarget(net, Evision.Constant.cv_DNN_TARGET_OPENCL())
-    Evision.DNN.Net.setPreferableBackend(net, Evision.Constant.cv_DNN_BACKEND_OPENCV())
-
-    {[], %{task: nil, frame: opts.frame, net: net, up_time: nil, bam: bam, clap: clap}}
+  def handle_init(_ctx, opts) do
+    frame = Kino.Frame.new()
+    Kino.render(frame)
+    {[], %{processing: false, frame: frame, model: opts.model, min_y: 1}}
   end
 
   @impl true
@@ -141,79 +132,124 @@ defmodule BamBam do
 
   @impl true
   def handle_buffer(:input, %{payload: payload}, ctx, state) do
-    if state.task && Process.alive?(state.task) do
-      {[], state}
-    else
-      element = self()
+    element = self()
 
-      {:ok, task} =
-        Task.start_link(fn ->
-          with {x, y} <- infer(payload, ctx.pads.input.stream_format, state) do
-            send(element, {:inference, x, y})
-          end
-        end)
-
-      {[], %{state | task: task}}
+    unless state.processing do
+      Task.start_link(fn ->
+        inference = infer(payload, ctx.pads.input.stream_format, state.model)
+        send(element, {:inference, inference})
+      end)
     end
+
+    {[], %{state | processing: true}}
   end
 
   @impl true
-  def handle_info({:inference, x, y}, _ctx, state) do
-    cond do
-      y < state.up_time ->
-        {[], %{state | up_time: y}}
+  def handle_info({:inference, %{x: x, y: y, score: score}}, _ctx, state) do
+    state = %{state | processing: false}
 
-      y - state.up_time > 0.1 ->
-        # and Membrane.Time.monotonic_time() - state.up_time < Membrane.Time.second() ->
+    if score >= 0.5, do: Kino.Frame.render(state.frame, {x, y})
+
+    cond do
+      score < 0.5 ->
+        {[], state}
+
+      y < state.min_y ->
+        {[], %{state | min_y: y}}
+
+      y - state.min_y > 0.1 ->
         buffer =
           if x < 0.5 do
             IO.write("CLAP ")
-            state.clap
+            @clap
           else
             IO.write("BAM ")
-            state.bam
+            @bam
           end
 
-        {[buffer: {:output, buffer}], %{state | up_time: nil}}
+        {[buffer: {:output, buffer}], %{state | min_y: 1}}
 
       true ->
         {[], state}
     end
   end
 
-  defp infer(payload, %{width: width, height: height}, state) do
+  defp infer(payload, %{width: width, height: height}, model) do
+    %{network: network, output_layers: output_layers, input_size: input_size} = model
+
     img = Evision.Mat.from_binary(payload, {:u, 8}, height, width, 3)
-    input_size = 416
 
     blob =
-      Evision.DNN.blobFromImage(
-        img,
-        scalefactor: 1.0 / 255.0,
-        size: {input_size, input_size},
-        swapRB: false,
-        crop: false
-      )
+      Evision.DNN.blobFromImage(img, scalefactor: 1.0 / 255.0, size: input_size)
 
-    out_layer_names = Evision.DNN.Net.getUnconnectedOutLayersNames(state.net)
+    Evision.DNN.Net.setInput(network, blob)
+    outputs = Evision.DNN.Net.forwardAndRetrieve(network, output_layers)
 
-    Evision.DNN.Net.setInput(state.net, blob)
-    outputs = Evision.DNN.Net.forwardAndRetrieve(state.net, out_layer_names)
-
-    output =
-      outputs
-      |> List.flatten()
-      |> Enum.map(&Evision.Mat.to_nx/1)
-      |> Enum.flat_map(&Nx.to_list/1)
-      |> Enum.map(fn [x, y, _w, h | scores] ->
-        %{x: x - h / 2, y: y, score: Enum.max(scores)}
-      end)
-      |> Enum.sort_by(& &1.score, :desc)
-      |> hd()
-
-    if output.score > 0.5 do
-      {output.x, output.y}
-      |> tap(&Kino.Frame.render(state.frame, &1))
-    end
+    outputs
+    |> List.flatten()
+    |> Enum.map(&Evision.Mat.to_nx/1)
+    |> Enum.flat_map(&Nx.to_list/1)
+    |> Enum.map(fn [x, y, _w, h | scores] ->
+      %{x: x - h / 2, y: y, score: Enum.max(scores)}
+    end)
+    |> Enum.max_by(& &1.score)
   end
 end
+```
+
+<!-- livebook:{"branch_parent_index":2} -->
+
+## BamBam
+
+```elixir
+import Membrane.ChildrenSpec
+
+p = Membrane.RCPipeline.start_link!()
+
+Membrane.RCPipeline.exec_actions(p,
+  spec:
+    child(Membrane.CameraCapture)
+    |> child(%Membrane.FFmpeg.SWScale.PixelFormatConverter{format: :RGB})
+    |> child(%BamBam{model: model})
+    |> child(Membrane.PortAudio.Sink)
+)
+```
+
+```elixir
+Membrane.RCPipeline.terminate(p)
+```
+
+<!-- livebook:{"branch_parent_index":2} -->
+
+## WebRTC
+
+```elixir
+ip = {192, 168, 83, 200}
+```
+
+```elixir
+import Membrane.ChildrenSpec
+
+p = Membrane.RCPipeline.start_link!()
+
+Membrane.RCPipeline.exec_actions(p,
+  spec:
+    child(%Membrane.WebRTC.Source{
+      signaling: {:websocket, ip: ip, port: 8829},
+      video_codec: :h264
+    })
+    |> via_out(:output, options: [kind: :video])
+    |> child(Membrane.H264.Parser)
+    |> child(Membrane.H264.FFmpeg.Decoder)
+    |> child(%Membrane.FFmpeg.SWScale.PixelFormatConverter{format: :RGB})
+    |> child(%BamBam{model: model})
+    |> child(SilenceFiller)
+    |> child(Membrane.Opus.Encoder)
+    |> via_in(:input, options: [kind: :audio])
+    |> child(%Membrane.WebRTC.Sink{signaling: {:websocket, ip: ip, port: 8830}})
+)
+```
+
+```elixir
+Membrane.RCPipeline.terminate(p)
 ```
