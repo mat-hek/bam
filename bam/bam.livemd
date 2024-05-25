@@ -1,4 +1,4 @@
-# BamBam
+# Project bam bam
 
 ```elixir
 Logger.configure(level: :info)
@@ -8,66 +8,10 @@ Mix.install([
   :membrane_sdk,
   {:membrane_webrtc_plugin, "~> 0.19.0"},
   {:ex_sdp, "~> 0.15.0", override: true},
+  {:utils, path: "#{__DIR__}/utils"},
   :kino
 ])
 ```
-
-## Setup
-
-```elixir
-Evision.getBuildInformation() |> IO.puts()
-```
-
-```elixir
-defmodule SilenceFiller do
-  use Membrane.Filter
-
-  def_input_pad(:input, accepted_format: Membrane.RawAudio)
-  def_output_pad(:output, accepted_format: Membrane.RawAudio)
-
-  @time Membrane.Time.milliseconds(20)
-
-  @impl true
-  def handle_stream_format(:input, _format, ctx, state) when ctx.old_stream_format != nil do
-    {[], state}
-  end
-
-  @impl true
-  def handle_stream_format(:input, format, _ctx, _opts) do
-    {[stream_format: {:output, format}, start_timer: {:timer, @time}], %{overtime: 0, pts: 0}}
-  end
-
-  @impl true
-  def handle_tick(:timer, ctx, state) do
-    %{overtime: overtime, pts: pts} = state
-    time = @time - overtime
-
-    if time > 0 do
-      silence = Membrane.RawAudio.silence(ctx.pads.input.stream_format, time)
-      buffer = %Membrane.Buffer{payload: silence, pts: state.pts}
-
-      real_time =
-        Membrane.RawAudio.bytes_to_time(byte_size(buffer.payload), ctx.pads.input.stream_format)
-
-      {[buffer: {:output, buffer}], %{state | pts: pts + real_time, overtime: 0}}
-    else
-      {[], %{state | overtime: overtime - @time}}
-    end
-  end
-
-  @impl true
-  def handle_buffer(:input, buffer, ctx, state) do
-    duration =
-      Membrane.RawAudio.bytes_to_time(byte_size(buffer.payload), ctx.pads.input.stream_format)
-
-    actions = [buffer: {:output, %{buffer | pts: state.pts}}]
-    state = %{state | overtime: state.overtime + duration, pts: state.pts + duration}
-    {actions, state}
-  end
-end
-```
-
-<!-- livebook:{"branch_parent_index":0} -->
 
 ## Get media
 
@@ -112,32 +56,32 @@ defmodule BamBam do
   def_input_pad(:input, accepted_format: Membrane.RawVideo)
   def_output_pad(:output, accepted_format: Membrane.RawAudio)
 
+  def_options(model: [])
+
   @bam %Membrane.Buffer{payload: File.read!("#{__DIR__}/bam.pcm")}
   @clap %Membrane.Buffer{payload: File.read!("#{__DIR__}/clap.pcm")}
-
-  def_options(model: [])
+  @out_format %Membrane.RawAudio{sample_rate: 48_000, channels: 2, sample_format: :s16le}
 
   @impl true
   def handle_init(_ctx, opts) do
     frame = Kino.Frame.new()
     Kino.render(frame)
-    {[], %{processing: false, frame: frame, model: opts.model, min_y: 1}}
+    {[], %{processing: false, in_format: nil, frame: frame, model: opts.model, min_y: 1}}
   end
 
   @impl true
-  def handle_stream_format(:input, _format, _ctx, state) do
-    stream_format = %Membrane.RawAudio{sample_rate: 48_000, channels: 2, sample_format: :s16le}
-    {[stream_format: {:output, stream_format}], state}
+  def handle_stream_format(:input, in_format, _ctx, state) do
+    {[stream_format: {:output, @out_format}], %{state | in_format: in_format}}
   end
 
   @impl true
-  def handle_buffer(:input, %{payload: payload}, ctx, state) do
+  def handle_buffer(:input, buffer, _ctx, state) do
     element = self()
 
     unless state.processing do
       Task.start_link(fn ->
-        inference = infer(payload, ctx.pads.input.stream_format, state.model)
-        send(element, {:inference, inference})
+        inference = infer(buffer.payload, state.in_format, state.model)
+        send(element, inference)
       end)
     end
 
@@ -145,21 +89,21 @@ defmodule BamBam do
   end
 
   @impl true
-  def handle_info({:inference, %{x: x, y: y, score: score}}, _ctx, state) do
+  def handle_info(inf, _ctx, state) do
     state = %{state | processing: false}
 
-    if score >= 0.5, do: Kino.Frame.render(state.frame, {x, y})
+    if inf.score >= 0.5, do: Kino.Frame.render(state.frame, inf)
 
     cond do
-      score < 0.5 ->
+      inf.score < 0.5 ->
         {[], state}
 
-      y < state.min_y ->
-        {[], %{state | min_y: y}}
+      inf.y < state.min_y ->
+        {[], %{state | min_y: inf.y}}
 
-      y - state.min_y > 0.1 ->
+      inf.y - state.min_y > 0.1 ->
         buffer =
-          if x < 0.5 do
+          if inf.x < 0.5 do
             IO.write("CLAP ")
             @clap
           else
@@ -174,16 +118,14 @@ defmodule BamBam do
     end
   end
 
-  defp infer(payload, %{width: width, height: height}, model) do
-    %{network: network, output_layers: output_layers, input_size: input_size} = model
-
-    img = Evision.Mat.from_binary(payload, {:u, 8}, height, width, 3)
+  defp infer(image, format, model) do
+    img = Evision.Mat.from_binary(image, {:u, 8}, format.height, format.width, 3)
 
     blob =
-      Evision.DNN.blobFromImage(img, scalefactor: 1.0 / 255.0, size: input_size)
+      Evision.DNN.blobFromImage(img, scalefactor: 1.0 / 255.0, size: model.input_size)
 
-    Evision.DNN.Net.setInput(network, blob)
-    outputs = Evision.DNN.Net.forwardAndRetrieve(network, output_layers)
+    Evision.DNN.Net.setInput(model.network, blob)
+    outputs = Evision.DNN.Net.forwardAndRetrieve(model.network, model.output_layers)
 
     outputs
     |> List.flatten()
@@ -197,7 +139,7 @@ defmodule BamBam do
 end
 ```
 
-<!-- livebook:{"branch_parent_index":2} -->
+<!-- livebook:{"branch_parent_index":1} -->
 
 ## BamBam
 
@@ -219,7 +161,7 @@ Membrane.RCPipeline.exec_actions(p,
 Membrane.RCPipeline.terminate(p)
 ```
 
-<!-- livebook:{"branch_parent_index":2} -->
+<!-- livebook:{"branch_parent_index":1} -->
 
 ## WebRTC
 
@@ -243,7 +185,7 @@ Membrane.RCPipeline.exec_actions(p,
     |> child(Membrane.H264.FFmpeg.Decoder)
     |> child(%Membrane.FFmpeg.SWScale.PixelFormatConverter{format: :RGB})
     |> child(%BamBam{model: model})
-    |> child(SilenceFiller)
+    |> child(Utils.SilenceFiller)
     |> child(Membrane.Opus.Encoder)
     |> via_in(:input, options: [kind: :audio])
     |> child(%Membrane.WebRTC.Sink{signaling: {:websocket, ip: ip, port: 8830}})

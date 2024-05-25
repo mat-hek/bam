@@ -2,8 +2,9 @@
 const player = document.getElementById("player");
 const pcConfig = { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' },] };
 const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+
 const setup_ws = () => {
-  const ws = new WebSocket(`${proto}//${ip}:8830`);
+  const ws = new WebSocket(`${proto}//${window.location.host}/ws_recv`);
   ws.onopen = () => start_connection(ws);
   ws.onclose = event => {
     console.log("WebSocket connection was terminated:", event);

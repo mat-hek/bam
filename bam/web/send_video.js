@@ -2,9 +2,10 @@
 const pcConfig = { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' },] };
 const mediaConstraints = { video: {width: 416, height: 416}, audio: false }
 const connStatus = document.getElementById("status");
+const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
 
 const setup_ws = () => {
-  const ws = new WebSocket(`ws://${ip}:8829`);
+  const ws = new WebSocket(`${proto}//${window.location.host}/ws_send`);
   ws.onopen = _ => start_connection(ws);
   ws.onclose = event => {
     connStatus.innerHTML = "Connecting..."

@@ -1,0 +1,27 @@
+master_process off;
+daemon off;
+events {}
+http {
+    server {
+        listen 0.0.0.0:1235;
+
+        location /ws_send {
+            proxy_pass http://127.0.0.1:8829/;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+        
+        }
+
+        location /ws_recv {
+            proxy_pass http://127.0.0.1:8830/;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+        }
+
+        location / {
+            root ${HTML_ROOT};
+        }
+    }
+}
