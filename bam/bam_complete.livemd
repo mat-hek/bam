@@ -1,4 +1,4 @@
-# Project bam bam
+# Project bam bam - complete
 
 ```elixir
 Logger.configure(level: :info)
@@ -26,6 +26,21 @@ Things to do:
 * Decode the video
 * Convert the video from YUV to RGB
 
+```elixir
+import Membrane.ChildrenSpec
+
+p = Membrane.RCPipeline.start_link!()
+
+Membrane.RCPipeline.exec_actions(p,
+  spec:
+    child(%Membrane.WebRTC.Source{signaling: {:websocket, port: 8829}, video_codec: :h264})
+    |> via_out(:output, options: [kind: :video])
+    |> child(Membrane.H264.Parser)
+    |> child(Membrane.H264.FFmpeg.Decoder)
+    |> child(%Membrane.FFmpeg.SWScale.PixelFormatConverter{format: :RGB})
+    |> child(%Membrane.Debug.Sink{handle_stream_format: &IO.inspect/1})
+)
+```
 
 ```elixir
 Membrane.Pipeline.terminate(p)
@@ -122,6 +137,33 @@ defmodule BamBam do
   @impl true
   def handle_stream_format(:input, format, _ctx, state) do
     {[stream_format: {:output, BamSound.format()}], %{state | input_format: format}}
+  end
+
+  @impl true
+  def handle_buffer(:input, buffer, _ctx, state) do
+    if state.processing == false do
+      element = self()
+
+      Task.start_link(fn ->
+        inference = BamDetector.infer(buffer.payload, state.input_format, state.model)
+        send(element, inference)
+      end)
+    end
+
+    {[], %{state | processing: true}}
+  end
+
+  @impl true
+  def handle_info(inference, _ctx, state) do
+    {is_bam, detector_state} = BamDetector.detect(inference, state.detector_state)
+    state = %{state | processing: false, detector_state: detector_state}
+
+    if is_bam do
+      buffer = %Membrane.Buffer{payload: state.bam}
+      {[buffer: {:output, buffer}], state}
+    else
+      {[], state}
+    end
   end
 end
 ```
