@@ -1,0 +1,186 @@
+<!-- livebook:{"file_entries":[{"name":"bambam.excalidraw.png","type":"attachment"},{"name":"bottom_left.png","type":"attachment"},{"name":"top_right.png","type":"attachment"}]} -->
+
+# Project bam bam
+
+```elixir
+Logger.configure(level: :info)
+
+Mix.install([
+  :evision,
+  :membrane_sdk,
+  {:membrane_webrtc_plugin, "~> 0.19.0"},
+  {:ex_sdp, "~> 0.15.0", override: true},
+  {:utils, path: "#{__DIR__}/utils"},
+  :kino
+])
+```
+
+## Project bam bam
+
+* Record hand movements with camera
+* Stream it over WebRTC
+* Detect hand position with AI
+* Emit _bam_ sound whenever the hand moves down
+* Stream the sound back
+
+![](files/bambam.excalidraw.png)
+
+## Stream from the client
+
+* Use `getUserMedia` to get the video from the browser
+* Use JS WebRTC API to send it to the server
+* Use JS WebRTC API to receive audio from the server
+* Put it into the HTML `<audio/>` element
+
+<!-- livebook:{"branch_parent_index":0} -->
+
+## Receive media on the server
+
+* Receive video over WebRTC
+* Parse the video
+* Decode the video
+* Convert the video from YUV to RGB https://deeprender.ai/blog/yuv-colour-and-compression
+
+```elixir
+
+```
+
+<!-- livebook:{"branch_parent_index":0} -->
+
+## Detect hand movement
+
+### ML in Elixir
+
+* Axon https://github.com/elixir-nx/axon/
+* Bumblebee https://github.com/elixir-nx/bumblebee/
+* Ortex https://github.com/elixir-nx/ortex
+* ExVision https://github.com/membraneframework-labs/ex_vision
+* Evision https://github.com/cocoa-xu/evision
+
+### Hand detection
+
+* Models prepared by Florian Bruggisser, source: https://github.com/cansik/yolo-hand-detection
+* Using [Evision](https://github.com/cocoa-xu/evision) to do the inference
+
+```elixir
+hand_top_right = Image.open!("/Users/matheksm/Downloads/top_right.png")
+hand_bottom_left = Image.open!("/Users/matheksm/Downloads/bottom_left.png")
+
+Kino.Layout.grid([hand_top_right, hand_bottom_left], columns: 2)
+```
+
+```elixir
+defmodule BamModel do
+  @type t :: %{network: Evision.DNN.Net.t(), output_layers: [String.t()]}
+
+  @type inference :: %{x: float(), y: float(), score: float()}
+
+  @spec load() :: t()
+  def load() do
+    path = "#{__DIR__}/../models"
+
+    network =
+      Evision.DNN.readNetFromDarknet("#{path}/cross-hands-tiny.cfg",
+        darknetModel: "#{path}/cross-hands-tiny.weights"
+      )
+
+    output_layers = Evision.DNN.Net.getUnconnectedOutLayersNames(network)
+
+    %{network: network, output_layers: output_layers}
+  end
+
+  @spec infer(binary(), %{width: pos_integer, height: pos_integer}, t()) :: inference
+  def infer(image, format, model) do
+  end
+end
+
+model = BamModel.load()
+
+image = hand_bottom_left
+{:ok, image_binary} = image |> Image.flatten!() |> Vix.Vips.Image.write_to_binary()
+
+BamModel.infer(
+  image_binary,
+  %{width: Image.width(image), height: Image.height(image)},
+  model
+)
+```
+
+```elixir
+defmodule BamDetector do
+  @type state :: number()
+
+  @spec init_state() :: state
+  def init_state() do
+    1
+  end
+
+  @spec detect(BamModel.inference(), state) :: {boolean, state}
+  def detect(inference, detector_state) do
+    cond do
+      inference.score < 0.5 -> {false, detector_state}
+      inference.y < detector_state -> {false, inference.y}
+      inference.y - detector_state > 0.2 -> {true, init_state()}
+      true -> {false, detector_state}
+    end
+  end
+end
+```
+
+```elixir
+defmodule BamSound do
+  @spec format() :: Membrane.RawAudio.t()
+  def format() do
+    %Membrane.RawAudio{sample_rate: 48_000, channels: 2, sample_format: :s16le}
+  end
+
+  @spec bam() :: binary()
+  def bam() do
+    File.read!("#{__DIR__}/clap.pcm")
+  end
+end
+```
+
+```elixir
+defmodule BamBam do
+  use Membrane.Filter
+
+  def_input_pad(:input, accepted_format: Membrane.RawVideo)
+  def_output_pad(:output, accepted_format: Membrane.RawAudio)
+
+  @impl true
+  def handle_init(_ctx, _opts) do
+    state = %{
+      input_format: nil,
+      model: BamModel.load(),
+      detector_state: BamDetector.init_state(),
+      bam: BamSound.bam(),
+      processing: false
+    }
+
+    {[], state}
+  end
+end
+```
+
+## Plug hand detection & stream back
+
+* Plug the new element into the pipeline
+* Fill audio gaps with silence
+* Encode the audio
+* Send the audio via WebRTC
+
+```elixir
+
+```
+
+<!-- livebook:{"branch_parent_index":0} -->
+
+## WebRTC & low latency streaming
+
+| &nbsp;                     | Sending a file    | Low-latency media streaming |
+| -------------------------- | ----------------- | --------------------------- |
+| Packet loss                | Always retransmit | Maybe drop it, FEC          |
+| Congestion decection       | On packet loss    | Constant monitoring         |
+| Recovering from congestion | Slow down         | Reduce quality              |
+| Transport protocol         | TCP               | Custom stack on top of UDP  |
