@@ -1,3 +1,5 @@
+<!-- livebook:{"file_entries":[{"name":"bambam.excalidraw.png","type":"attachment"},{"name":"bottom_left.png","type":"attachment"},{"name":"top_right.png","type":"attachment"}]} -->
+
 # Project bam bam - complete
 
 ```elixir
@@ -15,16 +17,29 @@ Mix.install([
 
 ## Project bam bam
 
+* Record hand movements with camera
+* Stream it over WebRTC
+* Detect hand position with AI
+* Emit _bam_ sound whenever the hand moves down
+* Stream the sound back
+
+![](files/bambam.excalidraw.png)
+
+## Stream from the client
+
+* Use `getUserMedia` to get the video from the browser
+* Use JS WebRTC API to send it to the server
+* Use JS WebRTC API to receive audio from the server
+* Put it into the HTML `<audio/>` element
+
 <!-- livebook:{"branch_parent_index":0} -->
 
-## Get media
-
-Things to do:
+## Receive media on the server
 
 * Receive video over WebRTC
 * Parse the video
 * Decode the video
-* Convert the video from YUV to RGB
+* Convert the video from YUV to RGB https://deeprender.ai/blog/yuv-colour-and-compression
 
 ```elixir
 import Membrane.ChildrenSpec
@@ -54,8 +69,20 @@ Membrane.Pipeline.terminate(p)
 * Using [Evision](https://github.com/cocoa-xu/evision) to do the inference
 
 ```elixir
-defmodule BamDetector do
-  def load_model() do
+hand_top_right = Image.open!("/Users/matheksm/Downloads/top_right.png")
+hand_bottom_left = Image.open!("/Users/matheksm/Downloads/bottom_left.png")
+
+Kino.Layout.grid([hand_top_right, hand_bottom_left], columns: 2)
+```
+
+```elixir
+defmodule BamModel do
+  @type t :: %{network: Evision.DNN.Net.t(), output_layers: [String.t()]}
+
+  @type inference :: %{x: float(), y: float(), score: float()}
+
+  @spec load() :: t()
+  def load() do
     path = "#{__DIR__}/../models"
 
     network =
@@ -68,6 +95,7 @@ defmodule BamDetector do
     %{network: network, output_layers: output_layers}
   end
 
+  @spec infer(binary(), %{width: pos_integer, height: pos_integer}, t()) :: inference
   def infer(image, format, model) do
     img = Evision.Mat.from_binary(image, {:u, 8}, format.height, format.width, 3)
 
@@ -86,16 +114,35 @@ defmodule BamDetector do
     end)
     |> Enum.max_by(& &1.score)
   end
+end
 
-  def init_detector() do
-    %{min_y: 1}
+model = BamModel.load()
+
+image = hand_bottom_left
+{:ok, image_binary} = image |> Image.flatten!() |> Vix.Vips.Image.write_to_binary()
+
+BamModel.infer(
+  image_binary,
+  %{width: Image.width(image), height: Image.height(image)},
+  model
+)
+```
+
+```elixir
+defmodule BamDetector do
+  @type state :: number()
+
+  @spec init_state() :: state
+  def init_state() do
+    1
   end
 
+  @spec detect(BamModel.inference(), state) :: {boolean, state}
   def detect(inference, detector_state) do
     cond do
       inference.score < 0.5 -> {false, detector_state}
-      inference.y < detector_state.min_y -> {false, %{detector_state | min_y: inference.y}}
-      inference.y - detector_state.min_y > 0.2 -> {true, init_detector()}
+      inference.y < detector_state -> {false, inference.y}
+      inference.y - detector_state > 0.2 -> {true, init_state()}
       true -> {false, detector_state}
     end
   end
@@ -104,12 +151,14 @@ end
 
 ```elixir
 defmodule BamSound do
+  @spec format() :: Membrane.RawAudio.t()
   def format() do
     %Membrane.RawAudio{sample_rate: 48_000, channels: 2, sample_format: :s16le}
   end
 
+  @spec bam() :: binary()
   def bam() do
-    File.read!("#{__DIR__}/bam.pcm")
+    File.read!("#{__DIR__}/clap.pcm")
   end
 end
 ```
@@ -125,8 +174,8 @@ defmodule BamBam do
   def handle_init(_ctx, _opts) do
     state = %{
       input_format: nil,
-      model: BamDetector.load_model(),
-      detector_state: BamDetector.init_detector(),
+      model: BamModel.load(),
+      detector_state: BamDetector.init_state(),
       bam: BamSound.bam(),
       processing: false
     }
@@ -145,7 +194,7 @@ defmodule BamBam do
       element = self()
 
       Task.start_link(fn ->
-        inference = BamDetector.infer(buffer.payload, state.input_format, state.model)
+        inference = BamModel.infer(buffer.payload, state.input_format, state.model)
         send(element, inference)
       end)
     end
@@ -167,6 +216,13 @@ defmodule BamBam do
   end
 end
 ```
+
+## Plug hand detection & stream back
+
+* Plug the new element into the pipeline
+* Fill audio gaps with silence
+* Encode the audio
+* Send the audio via WebRTC
 
 ```elixir
 import Membrane.ChildrenSpec
@@ -192,3 +248,14 @@ Membrane.RCPipeline.exec_actions(p,
 ```elixir
 Membrane.Pipeline.terminate(p)
 ```
+
+<!-- livebook:{"branch_parent_index":0} -->
+
+## WebRTC & low latency streaming
+
+| &nbsp;                     | Sending a file    | Low-latency media streaming |
+| -------------------------- | ----------------- | --------------------------- |
+| Packet loss                | Always retransmit | Maybe drop it, FEC          |
+| Congestion decection       | On packet loss    | Constant monitoring         |
+| Recovering from congestion | Slow down         | Reduce quality              |
+| Transport protocol         | TCP               | Custom stack on top of UDP  |
