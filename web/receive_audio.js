@@ -2,17 +2,29 @@
 const player = document.getElementById("player");
 const pcConfig = { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' },] };
 const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+const urlParams = new URLSearchParams(window.location.search);
+const port = urlParams.get("in_port") || window.location.port
+const port_str = port ? `:${port}` : ""
+const path = urlParams.get("in_path") || ""
 
 const setup_ws = () => {
-  const ws = new WebSocket(`${proto}//${window.location.host}/ws_recv`);
-  ws.onopen = () => start_connection(ws);
-  ws.onclose = event => {
-    console.log("WebSocket connection was terminated:", event);
+  try {
+    url = `${proto}//${window.location.hostname || "localhost"}${port_str}/${path}`;
+    console.log(`Opening receive websocket at ${url}`)
+    const ws = new WebSocket(url);
+    ws.onopen = () => start_connection(ws);
+    ws.onclose = event => {
+      console.log("WebSocket connection was terminated:", event);
+      setTimeout(setup_ws, 500);
+    }
+  } catch {
+  e =>
+    console.error(e);
     setTimeout(setup_ws, 500);
   }
 }
 
-try { setup_ws(); } catch { e => setTimeout(setup_ws, 500)}
+setup_ws();
 
 const start_connection = async (ws) => {
   player.srcObject = new MediaStream();

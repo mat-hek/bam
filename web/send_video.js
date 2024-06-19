@@ -3,21 +3,33 @@ const pcConfig = { 'iceServers': [{ 'urls': 'stun:stun.l.google.com:19302' },] }
 const mediaConstraints = { video: {width: 416, height: 416}, audio: false }
 const connStatus = document.getElementById("status");
 const proto = window.location.protocol === "https:" ? "wss:" : "ws:"
+const urlParams = new URLSearchParams(window.location.search);
+const port = urlParams.get("out_port") || window.location.port
+const port_str = port ? `:${port}` : ""
+const path = urlParams.get("out_path") || ""
 
 const setup_ws = () => {
-  const ws = new WebSocket(`${proto}//${window.location.host}/ws_send`);
-  ws.onopen = _ => start_connection(ws);
-  ws.onclose = event => {
-    connStatus.innerHTML = "Connecting..."
-    console.log("WebSocket connection was terminated:", event);
-    setTimeout(setup_ws, 500)
+  try {
+    const url = `${proto}//${window.location.hostname || "localhost"}${port_str}/${path}`
+    console.log(`Opening send websocket at ${url}`)
+    const ws = new WebSocket(url);
+    ws.onopen = _ => start_connection(ws);
+    ws.onclose = event => {
+      connStatus.innerHTML = "Connecting..."
+      console.log("WebSocket connection was terminated:", event);
+      setTimeout(setup_ws, 500);
+    }
+  } catch {
+    e =>
+      console.error(e);
+      setTimeout(setup_ws, 500);
   }
 }
-try { setup_ws(); } catch { e => setTimeout(setup_ws, 500)}
+
+setup_ws();
 
 const start_connection = async (ws) => {
   const localStream = await navigator.mediaDevices.getUserMedia(mediaConstraints);
-  // document.getElementById("video").srcObject = localStream;
   const pc = new RTCPeerConnection(pcConfig);
 
   pc.onicecandidate = event => {

@@ -3,7 +3,7 @@ daemon off;
 events {}
 http {
     server {
-        listen 0.0.0.0:1235;
+        listen 0.0.0.0:$PORT;
 
         location /ws_send {
             proxy_pass http://127.0.0.1:8829/;

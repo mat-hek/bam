@@ -8,8 +8,7 @@ Logger.configure(level: :info)
 Mix.install([
   :evision,
   :membrane_sdk,
-  {:membrane_webrtc_plugin, "~> 0.19.0"},
-  {:ex_sdp, "~> 0.15.0", override: true},
+  {:membrane_webrtc_plugin, "~> 0.20.0"},
   {:utils, path: "#{__DIR__}/utils"},
   :kino
 ])
@@ -31,6 +30,10 @@ Mix.install([
 * Use JS WebRTC API to send it to the server
 * Use JS WebRTC API to receive audio from the server
 * Put it into the HTML `<audio/>` element
+
+### Running frontend
+
+To run the frontend, open the `web/index.html?out_port=8829&in_port=8830` file in your browser. Note that when you run the server part, the frontend asks for the camera permissions.
 
 <!-- livebook:{"branch_parent_index":0} -->
 
@@ -69,8 +72,8 @@ Membrane.Pipeline.terminate(p)
 * Using [Evision](https://github.com/cocoa-xu/evision) to do the inference
 
 ```elixir
-hand_top_right = Image.open!("/Users/matheksm/Downloads/top_right.png")
-hand_bottom_left = Image.open!("/Users/matheksm/Downloads/bottom_left.png")
+hand_top_right = Image.open!("#{__DIR__}/files/top_right.png")
+hand_bottom_left = Image.open!("#{__DIR__}/files/bottom_left.png")
 
 Kino.Layout.grid([hand_top_right, hand_bottom_left], columns: 2)
 ```
@@ -83,12 +86,17 @@ defmodule BamModel do
 
   @spec load() :: t()
   def load() do
-    path = "#{__DIR__}/../models"
+    path = "#{__DIR__}/models"
 
-    network =
-      Evision.DNN.readNetFromDarknet("#{path}/cross-hands-tiny.cfg",
-        darknetModel: "#{path}/cross-hands-tiny.weights"
-      )
+    config = "#{path}/cross-hands-tiny.cfg"
+    weights = "#{path}/cross-hands-tiny.weights"
+
+    unless File.exists?(config) and File.exists?(weights) do
+      IO.puts("downloading models...")
+      {_output, 0} = System.shell("./download-models.sh", cd: path)
+    end
+
+    network = Evision.DNN.readNetFromDarknet(config, darknetModel: weights)
 
     output_layers = Evision.DNN.Net.getUnconnectedOutLayersNames(network)
 
@@ -118,7 +126,7 @@ end
 
 model = BamModel.load()
 
-image = hand_bottom_left
+image = hand_top_right
 {:ok, image_binary} = image |> Image.flatten!() |> Vix.Vips.Image.write_to_binary()
 
 BamModel.infer(
@@ -158,7 +166,7 @@ defmodule BamSound do
 
   @spec bam() :: binary()
   def bam() do
-    File.read!("#{__DIR__}/clap.pcm")
+    File.read!("#{__DIR__}/files/clap.pcm")
   end
 end
 ```
@@ -209,6 +217,7 @@ defmodule BamBam do
 
     if is_bam do
       buffer = %Membrane.Buffer{payload: state.bam}
+      IO.puts("BAM")
       {[buffer: {:output, buffer}], state}
     else
       {[], state}
@@ -217,7 +226,7 @@ defmodule BamBam do
 end
 ```
 
-## Plug hand detection & stream back
+### Plug hand detection & stream back
 
 * Plug the new element into the pipeline
 * Fill audio gaps with silence
